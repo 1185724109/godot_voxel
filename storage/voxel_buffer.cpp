@@ -831,7 +831,9 @@ void VoxelBuffer::downscale_to(VoxelBuffer &dst, Vector3i src_min, Vector3i src_
 			continue;
 		}
 
-		// Nearest-neighbor downscaling
+		// Most channels keep nearest-neighbor semantics. COLOR is the project's
+		// blocky material channel (0=air, 1..256=material): use deterministic
+		// occupancy+majority aggregation so initial mip generation and edits agree.
 
 		Vector3i pos;
 		for (pos.z = dst_min.z; pos.z < dst_max.z; ++pos.z) {
@@ -843,8 +845,41 @@ void VoxelBuffer::downscale_to(VoxelBuffer &dst, Vector3i src_min, Vector3i src_
 					ZN_ASSERT(is_position_valid(src_pos.x, src_pos.y, src_pos.z));
 
 					uint64_t v;
-					if (src_channel.compression != COMPRESSION_UNIFORM) {
-						// TODO Optimized version?
+					if (channel_index == CHANNEL_COLOR) {
+						uint64_t values[8];
+						unsigned int non_air_count = 0;
+						unsigned int value_count = 0;
+						for (int dz = 0; dz < 2; ++dz) {
+							for (int dx = 0; dx < 2; ++dx) {
+								for (int dy = 0; dy < 2; ++dy) {
+									const uint64_t sample = get_voxel(
+											src_pos + Vector3i(dx, dy, dz), channel_index);
+									if (sample != 0) {
+										values[value_count++] = sample;
+										++non_air_count;
+									}
+								}
+							}
+						}
+						v = 0;
+						if (non_air_count >= 4) {
+							unsigned int best_count = 0;
+							uint64_t best_value = UINT64_MAX;
+							for (unsigned int i = 0; i < value_count; ++i) {
+								unsigned int count = 0;
+								for (unsigned int j = 0; j < value_count; ++j) {
+									if (values[j] == values[i]) {
+										++count;
+									}
+								}
+								if (count > best_count || (count == best_count && values[i] < best_value)) {
+									best_count = count;
+									best_value = values[i];
+								}
+							}
+							v = best_value;
+						}
+					} else if (src_channel.compression != COMPRESSION_UNIFORM) {
 						v = get_voxel(src_pos, channel_index);
 					} else {
 						v = src_channel.defval;
