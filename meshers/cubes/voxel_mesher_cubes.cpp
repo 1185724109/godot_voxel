@@ -933,8 +933,11 @@ void VoxelMesherCubes::build(VoxelMesher::Output &output, const VoxelMesher::Inp
 			struct GetIndexFromPalette {
 				VoxelColorPalette &palette;
 				Color8 operator()(uint64_t i) const {
-					// Still providing alpha because it allows to separate the opaque and transparent surfaces
-					return Color8(i, 0, 0, palette.get_color8(i).a);
+					// 阶段 03 fork 定制（palette cube mesher）：
+					// cell 编码 0=air、1..256=材质（VoxelBackend）。顶点 R 通道 = 材质槽（cell-1, 0..255），
+					// shader 用 R 查 palette lookup texture；air(0) alpha=0 不产生面；
+					// 实体统一 alpha=255 → 单一 opaque surface（"顶点携带材质ID"）。
+					return i == 0 ? Color8(0, 0, 0, 0) : Color8(uint8_t(i - 1), 0, 0, 255);
 				}
 			};
 			const GetIndexFromPalette get_index_from_palette{ **params.palette };
