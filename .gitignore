@@ -4,6 +4,7 @@
 *.log
 *.o
 *.obj
+*.os
 *.pyc
 *.tmp
 *.dblite
@@ -12,8 +13,10 @@
 *.exp
 *.pdb
 *.dll
+*.import
 *.ilk
 
 shaders/dev/.godot/
 *.gen.glsl
 *.gen.h
+project/addons/zylann.voxel/bin/
