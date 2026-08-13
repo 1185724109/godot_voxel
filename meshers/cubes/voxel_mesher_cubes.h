@@ -64,6 +64,11 @@ public:
 	void set_store_colors_in_texture(bool enable);
 	bool get_store_colors_in_texture() const;
 
+	// Optional COLOR value treated as air by COLOR_SHADER_PALETTE meshing only.
+	// The voxel value remains available to gameplay queries such as VoxelBoxMover.
+	void set_ignored_color_value(int value);
+	int get_ignored_color_value() const;
+
 	bool supports_lod() const override {
 		return true;
 	}
@@ -125,6 +130,7 @@ private:
 		Ref<VoxelColorPalette> palette;
 		bool greedy_meshing = true;
 		bool store_colors_in_texture = false;
+		uint16_t ignored_color_value = 0;
 	};
 
 	struct Cache {

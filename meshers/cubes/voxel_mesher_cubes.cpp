@@ -932,15 +932,17 @@ void VoxelMesherCubes::build(VoxelMesher::Output &output, const VoxelMesher::Inp
 
 			struct GetIndexFromPalette {
 				VoxelColorPalette &palette;
+				uint16_t ignored_color_value;
 				Color8 operator()(uint64_t i) const {
 					// 阶段 03 fork 定制（palette cube mesher）：
 					// cell 编码 0=air、1..256=材质（VoxelBackend）。顶点 R 通道 = 材质槽（cell-1, 0..255），
 					// shader 用 R 查 palette lookup texture；air(0) alpha=0 不产生面；
 					// 实体统一 alpha=255 → 单一 opaque surface（"顶点携带材质ID"）。
-					return i == 0 ? Color8(0, 0, 0, 0) : Color8(uint8_t(i - 1), 0, 0, 255);
+					return i == 0 || i == ignored_color_value ? Color8(0, 0, 0, 0) :
+							Color8(uint8_t(i - 1), 0, 0, 255);
 				}
 			};
-			const GetIndexFromPalette get_index_from_palette{ **params.palette };
+			const GetIndexFromPalette get_index_from_palette{ **params.palette, params.ignored_color_value };
 
 			switch (channel_depth) {
 				case VoxelBuffer::DEPTH_8_BIT:
@@ -1099,6 +1101,17 @@ bool VoxelMesherCubes::get_store_colors_in_texture() const {
 	return _parameters.store_colors_in_texture;
 }
 
+void VoxelMesherCubes::set_ignored_color_value(int value) {
+	ERR_FAIL_COND(value < 0 || value > 65535);
+	RWLockWrite wlock(_parameters_lock);
+	_parameters.ignored_color_value = static_cast<uint16_t>(value);
+}
+
+int VoxelMesherCubes::get_ignored_color_value() const {
+	RWLockRead rlock(_parameters_lock);
+	return _parameters.ignored_color_value;
+}
+
 // Ref<Resource> VoxelMesherCubes::duplicate(bool p_subresources) const {
 // 	Parameters params;
 // 	{
@@ -1243,6 +1256,8 @@ void VoxelMesherCubes::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_color_mode", "mode"), &Self::set_color_mode);
 	ClassDB::bind_method(D_METHOD("get_color_mode"), &Self::get_color_mode);
+	ClassDB::bind_method(D_METHOD("set_ignored_color_value", "value"), &Self::set_ignored_color_value);
+	ClassDB::bind_method(D_METHOD("get_ignored_color_value"), &Self::get_ignored_color_value);
 
 	ClassDB::bind_method(D_METHOD("set_material_by_index", "id", "material"), &Self::set_material_by_index);
 
@@ -1267,6 +1282,11 @@ void VoxelMesherCubes::_bind_methods() {
 			PropertyInfo(Variant::INT, "color_mode", PROPERTY_HINT_ENUM, "Raw,MesherPalette,ShaderPalette"),
 			"set_color_mode",
 			"get_color_mode"
+	);
+	ADD_PROPERTY(
+			PropertyInfo(Variant::INT, "ignored_color_value", PROPERTY_HINT_RANGE, "0,65535,1"),
+			"set_ignored_color_value",
+			"get_ignored_color_value"
 	);
 	ADD_PROPERTY(
 			PropertyInfo(
