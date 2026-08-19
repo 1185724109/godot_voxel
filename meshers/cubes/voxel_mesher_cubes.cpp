@@ -66,12 +66,164 @@ enum FaceSide {
 
 } // namespace
 
-// Returns:
-// 0 if alpha is zero,
-// 1 if alpha is neither zero neither max,
-// 2 if alpha is max
+// Returns the occupancy/owner priority used when deciding which side of a
+// voxel boundary owns a face. Air is empty, ordinary intermediate alpha and
+// the cutout marker are occupied, blended has higher priority than cutout,
+// and opaque has the highest priority. The priority is deliberately shared by
+// all three cube-building paths so adjacent CUTOUT/BLENDED voxels have a
+// deterministic owner instead of producing duplicate coplanar faces.
 inline uint8_t get_alpha_index(Color8 c) {
-	return (c.a == 0xff) + (c.a > 0);
+	if (c.a == 0) {
+		return 0;
+	}
+	if (c.a == 0xff) {
+		return 3;
+	}
+	if (c.a == 0xfd) {
+		return 2;
+	}
+	return 1;
+}
+
+// Alpha markers are only used to carry render-class information through the
+// native vertex color. Other non-zero intermediate alpha values remain
+// CUTOUT for raw/mesher-palette compatibility. Alpha zero never reaches this
+// helper for a committed face because get_alpha_index treats it as air.
+inline uint8_t get_material_index(Color8 c) {
+	return c.a == 0xff ? VoxelMesherCubes::MATERIAL_OPAQUE :
+			c.a == 0xfd ? VoxelMesherCubes::MATERIAL_BLENDED : VoxelMesherCubes::MATERIAL_CUTOUT;
+}
+
+// Classic Minecraft-style corner AO. The three samples are taken on the
+// exposed face plane: two tangent-side voxels and their diagonal corner. A
+// full pair of side blockers wins over the diagonal sample, avoiding a bright
+// diagonal seam. Values are quantized to 0, 85, 170, or 255 for deterministic
+// vertex data and are written to COLOR.g by shader-palette paths.
+template <typename Voxel_T, typename Color_F>
+inline uint8_t get_vertex_ao(
+		const Span<const Voxel_T> voxel_buffer,
+		const Vector3i block_size,
+		const Vector3i cell_position,
+		const unsigned int face_axis,
+		const int face_sign,
+		const int tangent_x_sign,
+		const int tangent_y_sign,
+		Color_F color_func
+) {
+	const auto is_occupied = [&](const Vector3i position) {
+		// One voxel of padding is required by the mesher. Treat an absent sample
+		// as air as a defensive fallback for direct callers with a short buffer.
+		if (position.x < 0 || position.y < 0 || position.z < 0 || position.x >= block_size.x ||
+				position.y >= block_size.y || position.z >= block_size.z) {
+			return false;
+		}
+		const unsigned int index = Vector3iUtil::get_zxy_index(position, block_size);
+		return get_alpha_index(color_func(voxel_buffer[index])) != 0;
+	};
+
+	const unsigned int tangent_x_axis = g_face_axes_lut[face_axis][0];
+	const unsigned int tangent_y_axis = g_face_axes_lut[face_axis][1];
+	Vector3i sample_base = cell_position;
+	sample_base[face_axis] += face_sign;
+	Vector3i side_x = sample_base;
+	side_x[tangent_x_axis] += tangent_x_sign;
+	Vector3i side_y = sample_base;
+	side_y[tangent_y_axis] += tangent_y_sign;
+	Vector3i corner = side_x;
+	corner[tangent_y_axis] += tangent_y_sign;
+
+	const bool side_x_occupied = is_occupied(side_x);
+	const bool side_y_occupied = is_occupied(side_y);
+	const bool corner_occupied = is_occupied(corner);
+	const int occlusion = side_x_occupied && side_y_occupied ? 0 :
+			3 - int(side_x_occupied) - int(side_y_occupied) - int(corner_occupied);
+	return static_cast<uint8_t>(occlusion * 85);
+}
+
+// Meshing always receives one voxel of padding and the face loops below only
+// query samples inside that padded buffer. Keep a fast variant without the
+// defensive bounds branch in the inner AO loop; the public mesher contract
+// already rejects undersized buffers before entering these builders.
+template <typename Voxel_T, typename Color_F>
+inline uint8_t get_vertex_ao_unchecked(
+		const Span<const Voxel_T> voxel_buffer,
+		const Vector3i block_size,
+		const Vector3i cell_position,
+		const unsigned int face_axis,
+		const int face_sign,
+		const int tangent_x_sign,
+		const int tangent_y_sign,
+		Color_F color_func
+) {
+	const unsigned int tangent_x_axis = g_face_axes_lut[face_axis][0];
+	const unsigned int tangent_y_axis = g_face_axes_lut[face_axis][1];
+	Vector3i sample_base = cell_position;
+	sample_base[face_axis] += face_sign;
+	Vector3i side_x = sample_base;
+	side_x[tangent_x_axis] += tangent_x_sign;
+	Vector3i side_y = sample_base;
+	side_y[tangent_y_axis] += tangent_y_sign;
+	Vector3i corner = side_x;
+	corner[tangent_y_axis] += tangent_y_sign;
+
+	const bool side_x_occupied = get_alpha_index(
+			color_func(voxel_buffer[Vector3iUtil::get_zxy_index(side_x, block_size)])) != 0;
+	const bool side_y_occupied = get_alpha_index(
+			color_func(voxel_buffer[Vector3iUtil::get_zxy_index(side_y, block_size)])) != 0;
+	const bool corner_occupied = get_alpha_index(
+			color_func(voxel_buffer[Vector3iUtil::get_zxy_index(corner, block_size)])) != 0;
+	const int occlusion = side_x_occupied && side_y_occupied ? 0 :
+			3 - int(side_x_occupied) - int(side_y_occupied) - int(corner_occupied);
+	return static_cast<uint8_t>(occlusion * 85);
+}
+
+// The four corners of one quad share the two tangent-side samples. Gather the
+// eight unique occupancy samples once instead of repeating twelve color/palette
+// lookups through four independent AO calls.
+template <typename Voxel_T, typename Color_F>
+inline void fill_vertex_ao_unchecked(
+		const Span<const Voxel_T> voxel_buffer,
+		const Vector3i block_size,
+		const Vector3i cell_position,
+		const unsigned int face_axis,
+		const int face_sign,
+		Color_F color_func,
+		uint8_t (&out_ao)[4]
+) {
+	const unsigned int tangent_x_axis = g_face_axes_lut[face_axis][0];
+	const unsigned int tangent_y_axis = g_face_axes_lut[face_axis][1];
+	Vector3i sample_base = cell_position;
+	sample_base[face_axis] += face_sign;
+
+	const auto occupied = [&](const int tangent_x, const int tangent_y) {
+		Vector3i sample = sample_base;
+		sample[tangent_x_axis] += tangent_x;
+		sample[tangent_y_axis] += tangent_y;
+		return get_alpha_index(color_func(voxel_buffer[Vector3iUtil::get_zxy_index(sample, block_size)])) != 0;
+	};
+
+	const bool side_x_neg = occupied(-1, 0);
+	const bool side_x_pos = occupied(1, 0);
+	const bool side_y_neg = occupied(0, -1);
+	const bool side_y_pos = occupied(0, 1);
+	const bool corner_neg_neg = occupied(-1, -1);
+	const bool corner_pos_neg = occupied(1, -1);
+	const bool corner_neg_pos = occupied(-1, 1);
+	const bool corner_pos_pos = occupied(1, 1);
+	const auto shade = [](const bool side_x, const bool side_y, const bool corner) {
+		const int occlusion = side_x && side_y ? 0 : 3 - int(side_x) - int(side_y) - int(corner);
+		return static_cast<uint8_t>(occlusion * 85);
+	};
+	out_ao[0] = shade(side_x_neg, side_y_neg, corner_neg_neg);
+	out_ao[1] = shade(side_x_pos, side_y_neg, corner_pos_neg);
+	out_ao[2] = shade(side_x_neg, side_y_pos, corner_neg_pos);
+	out_ao[3] = shade(side_x_pos, side_y_pos, corner_pos_pos);
+}
+
+inline Color8 apply_vertex_ao(Color8 color, const uint8_t ao, const bool enabled) {
+	// COLOR.r is the shader palette slot and COLOR.a is the render-class marker;
+	// only the otherwise-unused green component carries AO.
+	return enabled ? Color8(color.r, ao, color.b, color.a) : color;
 }
 
 template <typename Voxel_T, typename Color_F>
@@ -79,7 +231,8 @@ void build_voxel_mesh_as_simple_cubes(
 		FixedArray<VoxelMesherCubes::Arrays, VoxelMesherCubes::MATERIAL_COUNT> &out_arrays_per_material,
 		const Span<const Voxel_T> voxel_buffer,
 		const Vector3i block_size,
-		Color_F color_func
+		Color_F color_func,
+		const bool encode_vertex_ao = false
 ) {
 	//
 	ERR_FAIL_COND(
@@ -144,8 +297,16 @@ void build_voxel_mesh_as_simple_cubes(
 
 					// Commit face to the mesh
 
-					const uint8_t material_index = color.a < 255;
+					const uint8_t material_index = get_material_index(color);
 					VoxelMesherCubes::Arrays &arrays = out_arrays_per_material[material_index];
+					const Vector3i cell_position(pos[0], pos[1], pos[2]);
+					const int face_sign = side == FACE_SIDE_FRONT ? -1 : 1;
+					// The FRONT face belongs to raw_color1, one voxel toward the
+					// positive face axis; BACK belongs to raw_color0 at `pos`.
+					Vector3i ao_cell_position = cell_position;
+					if (side == FACE_SIDE_FRONT) {
+						ao_cell_position[za] += 1;
+					}
 
 					const int vx0 = fx - VoxelMesherCubes::PADDING;
 					const int vy0 = fy - VoxelMesherCubes::PADDING;
@@ -186,11 +347,19 @@ void build_voxel_mesh_as_simple_cubes(
 					arrays.positions.push_back(v3);
 
 					// TODO Any way to not need Color anywhere? It's wasteful
-					const Color colorf = color;
-					arrays.colors.push_back(colorf);
-					arrays.colors.push_back(colorf);
-					arrays.colors.push_back(colorf);
-					arrays.colors.push_back(colorf);
+					uint8_t ao[4] = { 255, 255, 255, 255 };
+					if (encode_vertex_ao) {
+						fill_vertex_ao_unchecked(
+								voxel_buffer, block_size, ao_cell_position, za, face_sign, color_func, ao);
+					}
+					const Color colorf0 = apply_vertex_ao(color, ao[0], encode_vertex_ao);
+					const Color colorf1 = apply_vertex_ao(color, ao[1], encode_vertex_ao);
+					const Color colorf2 = apply_vertex_ao(color, ao[2], encode_vertex_ao);
+					const Color colorf3 = apply_vertex_ao(color, ao[3], encode_vertex_ao);
+					arrays.colors.push_back(colorf0);
+					arrays.colors.push_back(colorf1);
+					arrays.colors.push_back(colorf2);
+					arrays.colors.push_back(colorf3);
 
 					arrays.normals.push_back(n);
 					arrays.normals.push_back(n);
@@ -216,7 +385,8 @@ void build_voxel_mesh_as_greedy_cubes(
 		const Span<const Voxel_T> voxel_buffer,
 		const Vector3i block_size,
 		StdVector<uint8_t> &mask_memory_pool,
-		Color_F color_func
+		Color_F color_func,
+		const bool encode_vertex_ao = false
 ) {
 	//
 	ERR_FAIL_COND(
@@ -228,13 +398,16 @@ void build_voxel_mesh_as_greedy_cubes(
 	struct MaskValue {
 		Voxel_T color;
 		uint8_t side;
+		uint8_t ao[4];
 
 		inline bool operator==(const MaskValue &other) const {
-			return color == other.color && side == other.side;
+			return color == other.color && side == other.side && ao[0] == other.ao[0] && ao[1] == other.ao[1] &&
+					ao[2] == other.ao[2] && ao[3] == other.ao[3];
 		}
 
 		inline bool operator!=(const MaskValue &other) const {
-			return color != other.color || side != other.side;
+			return color != other.color || side != other.side || ao[0] != other.ao[0] || ao[1] != other.ao[1] ||
+					ao[2] != other.ao[2] || ao[3] != other.ao[3];
 		}
 	};
 
@@ -286,7 +459,7 @@ void build_voxel_mesh_as_greedy_cubes(
 					const uint8_t ai0 = get_alpha_index(color0);
 					const uint8_t ai1 = get_alpha_index(color1);
 
-					MaskValue mv;
+					MaskValue mv{};
 					if (ai0 == ai1) {
 						mv.side = FACE_SIDE_NONE;
 					} else if (ai0 > ai1) {
@@ -295,6 +468,27 @@ void build_voxel_mesh_as_greedy_cubes(
 					} else {
 						mv.color = raw_color1;
 						mv.side = FACE_SIDE_FRONT;
+					}
+
+					// Store AO in the mask so greedy merging never crosses a change in
+					// baked corner lighting. A disabled path uses a uniform white value,
+					// preserving the original greedy merge behavior and vertex colors.
+					if (mv.side != FACE_SIDE_NONE) {
+						const Vector3i cell_position(pos[0], pos[1], pos[2]);
+						const int face_sign = mv.side == FACE_SIDE_FRONT ? -1 : 1;
+						Vector3i ao_cell_position = cell_position;
+						if (mv.side == FACE_SIDE_FRONT) {
+							ao_cell_position[za] += 1;
+						}
+						if (encode_vertex_ao) {
+							fill_vertex_ao_unchecked(
+									voxel_buffer, block_size, ao_cell_position, za, face_sign, color_func, mv.ao);
+						} else {
+							mv.ao[0] = 255;
+							mv.ao[1] = 255;
+							mv.ao[2] = 255;
+							mv.ao[3] = 255;
+						}
 					}
 
 					mask[(fx - VoxelMesherCubes::PADDING) + (fy - VoxelMesherCubes::PADDING) * mask_size_x] = mv;
@@ -342,8 +536,8 @@ void build_voxel_mesh_as_greedy_cubes(
 
 					// Commit face to the mesh
 
-					const Color colorf = color_func(m.color);
-					const uint8_t material_index = colorf.a < 0.999f;
+					const Color8 color8 = color_func(m.color);
+					const uint8_t material_index = get_material_index(color8);
 					VoxelMesherCubes::Arrays &arrays = out_arrays_per_material[material_index];
 
 					Vector3f v0;
@@ -379,10 +573,10 @@ void build_voxel_mesh_as_greedy_cubes(
 					arrays.positions.push_back(v2);
 					arrays.positions.push_back(v3);
 
-					arrays.colors.push_back(colorf);
-					arrays.colors.push_back(colorf);
-					arrays.colors.push_back(colorf);
-					arrays.colors.push_back(colorf);
+					arrays.colors.push_back(apply_vertex_ao(color8, m.ao[0], encode_vertex_ao));
+					arrays.colors.push_back(apply_vertex_ao(color8, m.ao[1], encode_vertex_ao));
+					arrays.colors.push_back(apply_vertex_ao(color8, m.ao[2], encode_vertex_ao));
+					arrays.colors.push_back(apply_vertex_ao(color8, m.ao[3], encode_vertex_ao));
 
 					arrays.normals.push_back(n);
 					arrays.normals.push_back(n);
@@ -491,18 +685,18 @@ void build_voxel_mesh_as_greedy_cubes_atlased(
 					const uint8_t ai0 = get_alpha_index(color0);
 					const uint8_t ai1 = get_alpha_index(color1);
 
-					MaskValue mv;
-					Color8 color;
+					MaskValue mv{};
+					Color8 color(0, 0, 0, 0);
 					if (ai0 == ai1) {
 						mv.side = FACE_SIDE_NONE;
 					} else if (ai0 > ai1) {
 						color = color0;
 						mv.side = FACE_SIDE_BACK;
-						mv.material_index = color.a < 0.999f;
+						mv.material_index = get_material_index(color);
 					} else {
 						color = color1;
 						mv.side = FACE_SIDE_FRONT;
-						mv.material_index = color.a < 0.999f;
+						mv.material_index = get_material_index(color);
 					}
 
 					const unsigned int mask_index =
@@ -796,7 +990,7 @@ void VoxelMesherCubes::build(VoxelMesher::Output &output, const VoxelMesher::Inp
 	Ref<Image> atlas_image;
 
 	switch (params.color_mode) {
-		case COLOR_RAW:
+	case COLOR_RAW:
 			switch (channel_depth) {
 				case VoxelBuffer::DEPTH_8_BIT:
 					if (params.greedy_meshing) {
@@ -883,7 +1077,7 @@ void VoxelMesherCubes::build(VoxelMesher::Output &output, const VoxelMesher::Inp
 									block_size,
 									cache.mask_memory_pool,
 									get_color_from_palette
-							);
+						);
 							atlas_image =
 									make_greedy_atlas(cache.greedy_atlas_data, to_span(cache.arrays_per_material));
 						} else {
@@ -929,20 +1123,31 @@ void VoxelMesherCubes::build(VoxelMesher::Output &output, const VoxelMesher::Inp
 
 		case COLOR_SHADER_PALETTE: {
 			ERR_FAIL_COND_MSG(params.palette.is_null(), "Palette mode is used but no palette was specified");
+			const uint8_t *render_class_data =
+					params.render_class_palette.size() == static_cast<int>(VoxelColorPalette::MAX_COLORS) ?
+						params.render_class_palette.ptr() : nullptr;
 
 			struct GetIndexFromPalette {
 				VoxelColorPalette &palette;
 				uint16_t ignored_color_value;
+				const uint8_t *render_class_data;
 				Color8 operator()(uint64_t i) const {
 					// 阶段 03 fork 定制（palette cube mesher）：
 					// cell 编码 0=air、1..256=材质（VoxelBackend）。顶点 R 通道 = 材质槽（cell-1, 0..255），
 					// shader 用 R 查 palette lookup texture；air(0) alpha=0 不产生面；
-					// 实体统一 alpha=255 → 单一 opaque surface（"顶点携带材质ID"）。
+					// 默认实体 alpha=255；CUTOUT/BLENDED 使用不同 marker，分别
+					// 进入 native cutout/blended surface。
+					uint8_t alpha = 255;
+					if (render_class_data != nullptr && i > 0 && i <= VoxelColorPalette::MAX_COLORS) {
+						const uint8_t render_class = render_class_data[uint8_t(i - 1)];
+						alpha = render_class == 1 ? 254 : render_class == 2 ? 253 : 255;
+					}
 					return i == 0 || i == ignored_color_value ? Color8(0, 0, 0, 0) :
-							Color8(uint8_t(i - 1), 0, 0, 255);
+							Color8(uint8_t(i - 1), 255, 0, alpha);
 				}
 			};
-			const GetIndexFromPalette get_index_from_palette{ **params.palette, params.ignored_color_value };
+			const GetIndexFromPalette get_index_from_palette{
+					**params.palette, params.ignored_color_value, render_class_data};
 
 			switch (channel_depth) {
 				case VoxelBuffer::DEPTH_8_BIT:
@@ -952,11 +1157,16 @@ void VoxelMesherCubes::build(VoxelMesher::Output &output, const VoxelMesher::Inp
 								raw_channel,
 								block_size,
 								cache.mask_memory_pool,
-								get_index_from_palette
+								get_index_from_palette,
+								params.occlusion_enabled
 						);
 					} else {
 						build_voxel_mesh_as_simple_cubes(
-								cache.arrays_per_material, raw_channel, block_size, get_index_from_palette
+								cache.arrays_per_material,
+								raw_channel,
+								block_size,
+								get_index_from_palette,
+								params.occlusion_enabled
 						);
 					}
 					break;
@@ -968,14 +1178,16 @@ void VoxelMesherCubes::build(VoxelMesher::Output &output, const VoxelMesher::Inp
 								raw_channel.reinterpret_cast_to<const uint16_t>(),
 								block_size,
 								cache.mask_memory_pool,
-								get_index_from_palette
+								get_index_from_palette,
+								params.occlusion_enabled
 						);
 					} else {
 						build_voxel_mesh_as_simple_cubes(
 								cache.arrays_per_material,
 								raw_channel.reinterpret_cast_to<const uint16_t>(),
 								block_size,
-								get_index_from_palette
+								get_index_from_palette,
+								params.occlusion_enabled
 						);
 					}
 					break;
@@ -1080,6 +1292,26 @@ Ref<VoxelColorPalette> VoxelMesherCubes::get_palette() const {
 	return _parameters.palette;
 }
 
+void VoxelMesherCubes::set_render_class_palette(PackedByteArray palette) {
+	ERR_FAIL_COND_MSG(
+			palette.size() != 0 && palette.size() != static_cast<int>(VoxelColorPalette::MAX_COLORS),
+			"render_class_palette must be empty or contain exactly 256 bytes"
+	);
+	if (palette.size() == static_cast<int>(VoxelColorPalette::MAX_COLORS)) {
+		const uint8_t *data = palette.ptr();
+		for (int i = 0; i < palette.size(); ++i) {
+			ERR_FAIL_COND_MSG(data[i] > 2, "render_class_palette values must be 0, 1, or 2");
+		}
+	}
+	RWLockWrite wlock(_parameters_lock);
+	_parameters.render_class_palette = palette;
+}
+
+PackedByteArray VoxelMesherCubes::get_render_class_palette() const {
+	RWLockRead rlock(_parameters_lock);
+	return _parameters.render_class_palette;
+}
+
 void VoxelMesherCubes::set_color_mode(ColorMode mode) {
 	ERR_FAIL_INDEX(mode, COLOR_MODE_COUNT);
 	RWLockWrite wlock(_parameters_lock);
@@ -1099,6 +1331,21 @@ void VoxelMesherCubes::set_store_colors_in_texture(bool enable) {
 bool VoxelMesherCubes::get_store_colors_in_texture() const {
 	RWLockRead rlock(_parameters_lock);
 	return _parameters.store_colors_in_texture;
+}
+
+void VoxelMesherCubes::set_occlusion_enabled(bool enable) {
+	RWLockWrite wlock(_parameters_lock);
+	_parameters.occlusion_enabled = enable;
+}
+
+bool VoxelMesherCubes::get_occlusion_enabled() const {
+	RWLockRead rlock(_parameters_lock);
+	return _parameters.occlusion_enabled;
+}
+
+bool VoxelMesherCubes::is_vertex_ao_supported() const {
+	RWLockRead rlock(_parameters_lock);
+	return _parameters.color_mode == COLOR_SHADER_PALETTE && !_parameters.store_colors_in_texture;
 }
 
 void VoxelMesherCubes::set_ignored_color_value(int value) {
@@ -1156,11 +1403,29 @@ Ref<Material> VoxelMesherCubes::_b_get_opaque_material() const {
 }
 
 void VoxelMesherCubes::_b_set_transparent_material(Ref<Material> material) {
-	set_material_by_index(MATERIAL_TRANSPARENT, material);
+	// Legacy property alias: transparent used to be the only non-opaque
+	// surface, and now maps to the CUTOUT slot.
+	set_material_by_index(MATERIAL_CUTOUT, material);
 }
 
 Ref<Material> VoxelMesherCubes::_b_get_transparent_material() const {
-	return get_material_by_index(MATERIAL_TRANSPARENT);
+	return get_material_by_index(MATERIAL_CUTOUT);
+}
+
+void VoxelMesherCubes::_b_set_cutout_material(Ref<Material> material) {
+	set_material_by_index(MATERIAL_CUTOUT, material);
+}
+
+Ref<Material> VoxelMesherCubes::_b_get_cutout_material() const {
+	return get_material_by_index(MATERIAL_CUTOUT);
+}
+
+void VoxelMesherCubes::_b_set_blended_material(Ref<Material> material) {
+	set_material_by_index(MATERIAL_BLENDED, material);
+}
+
+Ref<Material> VoxelMesherCubes::_b_get_blended_material() const {
+	return get_material_by_index(MATERIAL_BLENDED);
 }
 
 Ref<Mesh> VoxelMesherCubes::generate_mesh_from_image(Ref<Image> image, float voxel_size) {
@@ -1253,19 +1518,33 @@ void VoxelMesherCubes::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_palette", "palette"), &Self::set_palette);
 	ClassDB::bind_method(D_METHOD("get_palette"), &Self::get_palette);
+	ClassDB::bind_method(D_METHOD("set_render_class_palette", "palette"), &Self::set_render_class_palette);
+	ClassDB::bind_method(D_METHOD("get_render_class_palette"), &Self::get_render_class_palette);
 
 	ClassDB::bind_method(D_METHOD("set_color_mode", "mode"), &Self::set_color_mode);
 	ClassDB::bind_method(D_METHOD("get_color_mode"), &Self::get_color_mode);
+	ClassDB::bind_method(D_METHOD("set_store_colors_in_texture", "enable"), &Self::set_store_colors_in_texture);
+	ClassDB::bind_method(D_METHOD("get_store_colors_in_texture"), &Self::get_store_colors_in_texture);
+	ClassDB::bind_method(D_METHOD("set_occlusion_enabled", "enable"), &Self::set_occlusion_enabled);
+	ClassDB::bind_method(D_METHOD("get_occlusion_enabled"), &Self::get_occlusion_enabled);
+	ClassDB::bind_method(D_METHOD("is_vertex_ao_supported"), &Self::is_vertex_ao_supported);
 	ClassDB::bind_method(D_METHOD("set_ignored_color_value", "value"), &Self::set_ignored_color_value);
 	ClassDB::bind_method(D_METHOD("get_ignored_color_value"), &Self::get_ignored_color_value);
 
 	ClassDB::bind_method(D_METHOD("set_material_by_index", "id", "material"), &Self::set_material_by_index);
+	ClassDB::bind_method(D_METHOD("get_material_index_count"), &Self::get_material_index_count);
 
 	ClassDB::bind_method(D_METHOD("_get_opaque_material"), &Self::_b_get_opaque_material);
 	ClassDB::bind_method(D_METHOD("_set_opaque_material", "material"), &Self::_b_set_opaque_material);
 
 	ClassDB::bind_method(D_METHOD("_get_transparent_material"), &Self::_b_get_transparent_material);
 	ClassDB::bind_method(D_METHOD("_set_transparent_material", "material"), &Self::_b_set_transparent_material);
+
+	ClassDB::bind_method(D_METHOD("_get_cutout_material"), &Self::_b_get_cutout_material);
+	ClassDB::bind_method(D_METHOD("_set_cutout_material", "material"), &Self::_b_set_cutout_material);
+
+	ClassDB::bind_method(D_METHOD("_get_blended_material"), &Self::_b_get_blended_material);
+	ClassDB::bind_method(D_METHOD("_set_blended_material", "material"), &Self::_b_set_blended_material);
 
 	ClassDB::bind_static_method(
 			Self::get_class_static(),
@@ -1289,11 +1568,26 @@ void VoxelMesherCubes::_bind_methods() {
 			"get_ignored_color_value"
 	);
 	ADD_PROPERTY(
+			PropertyInfo(Variant::BOOL, "store_colors_in_texture"),
+			"set_store_colors_in_texture",
+			"get_store_colors_in_texture"
+	);
+	ADD_PROPERTY(
+			PropertyInfo(Variant::BOOL, "occlusion_enabled"),
+			"set_occlusion_enabled",
+			"get_occlusion_enabled"
+	);
+	ADD_PROPERTY(
 			PropertyInfo(
 					Variant::OBJECT, "palette", PROPERTY_HINT_RESOURCE_TYPE, VoxelColorPalette::get_class_static()
 			),
 			"set_palette",
 			"get_palette"
+	);
+	ADD_PROPERTY(
+			PropertyInfo(Variant::PACKED_BYTE_ARRAY, "render_class_palette", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE),
+			"set_render_class_palette",
+			"get_render_class_palette"
 	);
 
 	ADD_PROPERTY(
@@ -1316,9 +1610,31 @@ void VoxelMesherCubes::_bind_methods() {
 			"_set_transparent_material",
 			"_get_transparent_material"
 	);
+	ADD_PROPERTY(
+			PropertyInfo(
+					Variant::OBJECT,
+					"cutout_material",
+					PROPERTY_HINT_RESOURCE_TYPE,
+					zylann::godot::MATERIAL_3D_PROPERTY_HINT_STRING
+			),
+			"_set_cutout_material",
+			"_get_cutout_material"
+	);
+	ADD_PROPERTY(
+			PropertyInfo(
+					Variant::OBJECT,
+					"blended_material",
+					PROPERTY_HINT_RESOURCE_TYPE,
+					zylann::godot::MATERIAL_3D_PROPERTY_HINT_STRING
+			),
+			"_set_blended_material",
+			"_get_blended_material"
+	);
 
 	BIND_ENUM_CONSTANT(MATERIAL_OPAQUE);
+	BIND_ENUM_CONSTANT(MATERIAL_CUTOUT);
 	BIND_ENUM_CONSTANT(MATERIAL_TRANSPARENT);
+	BIND_ENUM_CONSTANT(MATERIAL_BLENDED);
 	BIND_ENUM_CONSTANT(MATERIAL_COUNT);
 
 	BIND_ENUM_CONSTANT(COLOR_RAW);

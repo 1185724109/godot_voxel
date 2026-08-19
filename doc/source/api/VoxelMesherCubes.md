@@ -18,6 +18,8 @@ Type                                                                            
 [ColorMode](VoxelMesherCubes.md#enumerations)                                   | [color_mode](#i_color_mode)                          | COLOR_RAW (0) 
 [bool](https://docs.godotengine.org/en/stable/classes/class_bool.html)          | [greedy_meshing_enabled](#i_greedy_meshing_enabled)  | true          
 [Material](https://docs.godotengine.org/en/stable/classes/class_material.html)  | [opaque_material](#i_opaque_material)                |               
+[Material](https://docs.godotengine.org/en/stable/classes/class_material.html)  | [cutout_material](#i_cutout_material)                |
+[Material](https://docs.godotengine.org/en/stable/classes/class_material.html)  | [blended_material](#i_blended_material)              |
 [VoxelColorPalette](VoxelColorPalette.md)                                       | [palette](#i_palette)                                |               
 [Material](https://docs.godotengine.org/en/stable/classes/class_material.html)  | [transparent_material](#i_transparent_material)      |               
 <p></p>
@@ -36,8 +38,10 @@ Return                                                                  | Signat
 enum **Materials**: 
 
 - <span id="i_MATERIAL_OPAQUE"></span>**MATERIAL_OPAQUE** = **0** --- Index of the opaque material.
-- <span id="i_MATERIAL_TRANSPARENT"></span>**MATERIAL_TRANSPARENT** = **1** --- Index of the transparent material.
-- <span id="i_MATERIAL_COUNT"></span>**MATERIAL_COUNT** = **2** --- Maximum number of materials.
+- <span id="i_MATERIAL_CUTOUT"></span>**MATERIAL_CUTOUT** = **1** --- Index of the alpha-scissor material.
+- <span id="i_MATERIAL_TRANSPARENT"></span>**MATERIAL_TRANSPARENT** = **1** --- Legacy alias for the cutout material.
+- <span id="i_MATERIAL_BLENDED"></span>**MATERIAL_BLENDED** = **2** --- Index of the alpha-blended material.
+- <span id="i_MATERIAL_COUNT"></span>**MATERIAL_COUNT** = **3** --- Maximum number of materials.
 
 enum **ColorMode**: 
 
@@ -64,9 +68,17 @@ Material that will be used for opaque parts of the mesh.
 
 Palette that will be used when using the [COLOR_MESHER_PALETTE](VoxelMesherCubes.md#i_COLOR_MESHER_PALETTE) color mode.
 
+### [Material](https://docs.godotengine.org/en/stable/classes/class_material.html)<span id="i_cutout_material"></span> **cutout_material**
+
+Material used for alpha-scissor/cutout parts of the mesh.
+
+### [Material](https://docs.godotengine.org/en/stable/classes/class_material.html)<span id="i_blended_material"></span> **blended_material**
+
+Material used for alpha-blended parts of the mesh. Native terrain ordering is limited to its chunk/object draw granularity.
+
 ### [Material](https://docs.godotengine.org/en/stable/classes/class_material.html)<span id="i_transparent_material"></span> **transparent_material**
 
-Material that will be used for transparent parts of the mesh (colors where alpha is not set to max).
+Legacy alias for [cutout_material](VoxelMesherCubes.md#i_cutout_material).
 
 ## Method Descriptions
 

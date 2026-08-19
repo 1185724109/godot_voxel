@@ -19,7 +19,10 @@ public:
 
 	enum Materials { //
 		MATERIAL_OPAQUE = 0,
-		MATERIAL_TRANSPARENT,
+		MATERIAL_CUTOUT,
+		// Kept as an ABI/source-compatible alias for the old two-surface API.
+		MATERIAL_TRANSPARENT = MATERIAL_CUTOUT,
+		MATERIAL_BLENDED,
 		MATERIAL_COUNT
 	};
 
@@ -51,6 +54,11 @@ public:
 	void set_palette(Ref<VoxelColorPalette> palette);
 	Ref<VoxelColorPalette> get_palette() const;
 
+	// Optional 256-byte render-class table. Slot values are 0=opaque, 1=cutout,
+	// and 2=blended; an empty table preserves the legacy opaque path.
+	void set_render_class_palette(PackedByteArray palette);
+	PackedByteArray get_render_class_palette() const;
+
 	// TODO GDX: Resource::duplicate() cannot be overriden (while it can in modules).
 	// This will lead to performance degradation and maybe unexpected behavior
 	// #if defined(ZN_GODOT)
@@ -63,6 +71,12 @@ public:
 
 	void set_store_colors_in_texture(bool enable);
 	bool get_store_colors_in_texture() const;
+
+	// Bakes deterministic cube vertex AO into COLOR.g for COLOR_SHADER_PALETTE
+	// meshes. COLOR.r and COLOR.a remain the palette slot/render-class markers.
+	void set_occlusion_enabled(bool enable);
+	bool get_occlusion_enabled() const;
+	bool is_vertex_ao_supported() const;
 
 	// Optional COLOR value treated as air by COLOR_SHADER_PALETTE meshing only.
 	// The voxel value remains available to gameplay queries such as VoxelBoxMover.
@@ -123,13 +137,21 @@ private:
 	void _b_set_transparent_material(Ref<Material> material);
 	Ref<Material> _b_get_transparent_material() const;
 
+	void _b_set_cutout_material(Ref<Material> material);
+	Ref<Material> _b_get_cutout_material() const;
+
+	void _b_set_blended_material(Ref<Material> material);
+	Ref<Material> _b_get_blended_material() const;
+
 	static void _bind_methods();
 
 	struct Parameters {
 		ColorMode color_mode = COLOR_RAW;
 		Ref<VoxelColorPalette> palette;
+		PackedByteArray render_class_palette;
 		bool greedy_meshing = true;
 		bool store_colors_in_texture = false;
+		bool occlusion_enabled = false;
 		uint16_t ignored_color_value = 0;
 	};
 
