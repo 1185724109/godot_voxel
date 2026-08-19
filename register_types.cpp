@@ -29,6 +29,7 @@
 #include "storage/metadata/voxel_metadata_factory.h"
 #include "storage/metadata/voxel_metadata_variant.h"
 #include "storage/voxel_buffer_gd.h"
+#include "storage/voxel_compact_data.h"
 #include "storage/voxel_format_gd.h"
 #include "storage/voxel_memory_pool.h"
 #include "streams/region/voxel_stream_region_files.h"
@@ -280,6 +281,7 @@ void initialize_voxel_module(ModuleInitializationLevel p_level) {
 
 		// Storage
 		ClassDB::register_class<zylann::voxel::godot::VoxelBuffer>();
+		ClassDB::register_class<zylann::voxel::godot::VoxelCompactData>();
 		ClassDB::register_class<zylann::voxel::godot::VoxelFormat>();
 
 		// Nodes
