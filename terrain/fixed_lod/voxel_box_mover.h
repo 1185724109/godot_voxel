@@ -43,6 +43,9 @@ public:
 	float get_max_step_height() const;
 
 	bool has_stepped_up() const;
+	inline uint32_t get_last_candidate_box_count() const {
+		return _last_candidate_box_count;
+	}
 
 private:
 #if defined(ZN_GODOT)
@@ -63,6 +66,7 @@ private:
 
 	// States
 	bool _has_stepped_up = false;
+	mutable uint32_t _last_candidate_box_count = 0;
 };
 
 } // namespace zylann::voxel

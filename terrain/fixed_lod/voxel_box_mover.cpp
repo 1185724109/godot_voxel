@@ -238,17 +238,75 @@ void collect_boxes_cubes(
 	const int channel = VoxelBuffer::CHANNEL_COLOR;
 	VoxelSingleValue defval;
 	defval.i = 0;
-
-	Vector3i i = minp;
-
-	// TODO Optimization: read the whole box of voxels at once, querying individually is slower
-	for (i.z = minp.z; i.z < maxp.z; ++i.z) {
-		for (i.y = minp.y; i.y < maxp.y; ++i.y) {
-			for (i.x = minp.x; i.x < maxp.x; ++i.x) {
-				const int color_data = voxels.get_voxel(i, channel, defval).i;
-				if (color_data != 0) {
-					potential_boxes.push_back(AABB(i, Vector3(1, 1, 1)));
+	const Vector3i size = maxp - minp;
+	if (size.x <= 0 || size.y <= 0 || size.z <= 0) {
+		return;
+	}
+	const size_t volume = size_t(size.x) * size_t(size.y) * size_t(size.z);
+	// A player body can overlap thousands of 5cm cells. Emitting one AABB per cell makes
+	// both the narrow phase and stair query visibly hitch on solid walls and uneven ground.
+	// Build the same occupied union, then greedily coalesce it into integer boxes.
+	static thread_local StdVector<uint8_t> s_occupancy;
+	StdVector<uint8_t> &occupancy = s_occupancy;
+	occupancy.resize(volume);
+	const auto index_of = [size](int x, int y, int z) {
+		return size_t(x) + size_t(size.x) * (size_t(y) + size_t(size.y) * size_t(z));
+	};
+	for (int z = 0; z < size.z; ++z) {
+		for (int y = 0; y < size.y; ++y) {
+			for (int x = 0; x < size.x; ++x) {
+				const Vector3i pos = minp + Vector3i(x, y, z);
+				occupancy[index_of(x, y, z)] = voxels.get_voxel(pos, channel, defval).i != 0;
+			}
+		}
+	}
+	for (int z0 = 0; z0 < size.z; ++z0) {
+		for (int y0 = 0; y0 < size.y; ++y0) {
+			for (int x0 = 0; x0 < size.x; ++x0) {
+				if (occupancy[index_of(x0, y0, z0)] == 0) {
+					continue;
 				}
+				int x1 = x0 + 1;
+				while (x1 < size.x && occupancy[index_of(x1, y0, z0)] != 0) {
+					++x1;
+				}
+				int y1 = y0 + 1;
+				for (; y1 < size.y; ++y1) {
+					bool full = true;
+					for (int x = x0; x < x1; ++x) {
+						if (occupancy[index_of(x, y1, z0)] == 0) {
+							full = false;
+							break;
+						}
+					}
+					if (!full) {
+						break;
+					}
+				}
+				int z1 = z0 + 1;
+				for (; z1 < size.z; ++z1) {
+					bool full = true;
+					for (int y = y0; y < y1 && full; ++y) {
+						for (int x = x0; x < x1; ++x) {
+							if (occupancy[index_of(x, y, z1)] == 0) {
+								full = false;
+								break;
+							}
+						}
+					}
+					if (!full) {
+						break;
+					}
+				}
+				for (int z = z0; z < z1; ++z) {
+					for (int y = y0; y < y1; ++y) {
+						for (int x = x0; x < x1; ++x) {
+							occupancy[index_of(x, y, z)] = 0;
+						}
+					}
+				}
+				potential_boxes.push_back(AABB(
+						Vector3(minp + Vector3i(x0, y0, z0)), Vector3(x1 - x0, y1 - y0, z1 - z0)));
 			}
 		}
 	}
@@ -309,6 +367,7 @@ Vector3 VoxelBoxMover::get_motion(
 	// Collect potential collisions with the terrain (broad phase)
 	// TODO If motion is really big, we may want something more optimal or reject it
 	collect_boxes(terrain_data, mesher, expanded_box, _collision_mask, potential_boxes);
+	_last_candidate_box_count = potential_boxes.size();
 
 	// Calculate collisions (narrow phase)
 	Vector3 slided_motion = zylann::voxel::get_motion(box, motion, to_span(potential_boxes));
@@ -397,6 +456,7 @@ bool VoxelBoxMover::intersects(
 
 	// Collect potential collisions with the terrain (broad phase)
 	collect_boxes(terrain_data, mesher, aabb, _collision_mask, potential_boxes);
+	_last_candidate_box_count = potential_boxes.size();
 
 	return zylann::voxel::intersects(to_span(potential_boxes), aabb);
 }
@@ -443,6 +503,8 @@ void VoxelBoxMover::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_max_step_height"), &VoxelBoxMover::get_max_step_height);
 
 	ClassDB::bind_method(D_METHOD("has_stepped_up"), &VoxelBoxMover::has_stepped_up);
+	ClassDB::bind_method(
+			D_METHOD("get_last_candidate_box_count"), &VoxelBoxMover::get_last_candidate_box_count);
 }
 
 } // namespace zylann::voxel
