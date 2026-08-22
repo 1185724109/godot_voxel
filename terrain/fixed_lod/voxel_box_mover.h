@@ -42,6 +42,13 @@ public:
 	void set_max_step_height(float height);
 	float get_max_step_height() const;
 
+	// Stair climbing performs an additional downward cast and, if it finds a
+	// possible step, a second broad-phase query.  Consumers can bound that work
+	// for real-time locomotion without changing normal collision behaviour.
+	// A value of zero keeps the historical, unlimited behaviour.
+	void set_step_climbing_candidate_limit(uint32_t limit);
+	uint32_t get_step_climbing_candidate_limit() const;
+
 	bool has_stepped_up() const;
 	inline uint32_t get_last_candidate_box_count() const {
 		return _last_candidate_box_count;
@@ -63,6 +70,7 @@ private:
 	uint32_t _collision_mask = 0xffffffff; // Everything
 	bool _step_climbing_enabled = false;
 	real_t _max_step_height = 0.5;
+	uint32_t _step_climbing_candidate_limit = 0;
 
 	// States
 	bool _has_stepped_up = false;

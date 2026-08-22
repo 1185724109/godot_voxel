@@ -376,6 +376,11 @@ Vector3 VoxelBoxMover::get_motion(
 	// If we were moving, changed horizontal direction due to collision, and resulting motion is about horizontal
 	_has_stepped_up = false;
 	if (_step_climbing_enabled &&
+		// Jagged voxel surfaces can produce many independent boxes. They are not
+		// a reliable step surface, and running the hypothetical step query every
+		// physics tick is disproportionately expensive on standalone XR.
+		(_step_climbing_candidate_limit == 0 ||
+				potential_boxes.size() <= _step_climbing_candidate_limit) &&
 		// Movement is horizontal?
 		Math::abs(slided_motion.y) < 0.001 && Vector2(motion.x, motion.z).length_squared() > 0.0001 &&
 		// Motor movement isn't the same as resulting slided motion?
@@ -436,6 +441,14 @@ void VoxelBoxMover::set_max_step_height(float height) {
 
 float VoxelBoxMover::get_max_step_height() const {
 	return _max_step_height;
+}
+
+void VoxelBoxMover::set_step_climbing_candidate_limit(uint32_t limit) {
+	_step_climbing_candidate_limit = limit;
+}
+
+uint32_t VoxelBoxMover::get_step_climbing_candidate_limit() const {
+	return _step_climbing_candidate_limit;
 }
 
 bool VoxelBoxMover::intersects(
@@ -501,6 +514,12 @@ void VoxelBoxMover::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_max_step_height", "height"), &VoxelBoxMover::set_max_step_height);
 	ClassDB::bind_method(D_METHOD("get_max_step_height"), &VoxelBoxMover::get_max_step_height);
+	ClassDB::bind_method(
+			D_METHOD("set_step_climbing_candidate_limit", "limit"),
+			&VoxelBoxMover::set_step_climbing_candidate_limit);
+	ClassDB::bind_method(
+			D_METHOD("get_step_climbing_candidate_limit"),
+			&VoxelBoxMover::get_step_climbing_candidate_limit);
 
 	ClassDB::bind_method(D_METHOD("has_stepped_up"), &VoxelBoxMover::has_stepped_up);
 	ClassDB::bind_method(
